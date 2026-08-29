@@ -1,26 +1,158 @@
-const express=require('express');
-const cors=require('cors');
-const QRCode=require('qrcode');
-const {Client,LocalAuth}=require('whatsapp-web.js');
-const app=express();
-const PORT=Number(process.env.PORT||3030);
-app.use(cors());app.use(express.json({limit:'1mb'}));
-let qrText='';let state='starting';let client=null;let lastError='';
-function phone(v){let n=String(v||'').replace(/\D/g,'');if(n.startsWith('00'))n=n.slice(2);if(n.startsWith('0'))n='967'+n.slice(1);return n;}
-async function boot(){
-  if(client)return;
-  state='starting';
-  client=new Client({authStrategy:new LocalAuth({clientId:'ashish-admin'}),puppeteer:{headless:true,args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']}});
-  client.on('qr',q=>{qrText=q;state='qr';console.log('\n[ASHISH] QR جاهز — افتح واتساب > الأجهزة المرتبطة > ربط جهاز\n');});
-  client.on('authenticated',()=>{state='authenticated';qrText='';console.log('[ASHISH] تم التحقق من الجلسة');});
-  client.on('ready',()=>{state='ready';qrText='';console.log('[ASHISH] واتساب جاهز لإرسال الإشعارات');});
-  client.on('auth_failure',e=>{state='error';lastError=String(e||'auth_failure');});
-  client.on('disconnected',r=>{state='disconnected';console.log('[ASHISH] disconnected',r);client=null;setTimeout(boot,2500);});
-  try{await client.initialize();}catch(e){state='error';lastError=e.message||String(e);console.error(e);client=null;}
+const express = require('express');
+const cors = require('cors');
+const QRCode = require('qrcode');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+
+const app = express();
+const PORT = Number(process.env.PORT) || 10000;
+
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+
+let qrText = '';
+let state = 'starting';
+let client = null;
+
+function formatNumber(phone) {
+    let num = String(phone || '').replace(/\D/g, '');
+    if (num.startsWith('00')) num = num.slice(2);
+    if (num.startsWith('0')) num = '967' + num.slice(1);
+    if (!num.startsWith('967') && num.length === 9) num = '967' + num;
+    return num.includes('@c.us') ? num : `${num}@c.us`;
 }
-app.get('/status',(req,res)=>res.json({ok:true,state,ready:state==='ready',qr:!!qrText,label:state==='ready'?'متصل وجاهز':state==='qr'?'بانتظار مسح QR':'غير متصل',error:lastError}));
-app.get('/qr',async(req,res)=>{if(!qrText)return res.json({ok:false,available:false});try{res.json({ok:true,available:true,dataUrl:await QRCode.toDataURL(qrText,{margin:1,width:360})});}catch(e){res.status(500).json({ok:false,error:e.message});}});
-app.post('/start',async(req,res)=>{boot().catch(()=>{});res.json({ok:true});});
-app.post('/send',async(req,res)=>{try{if(state!=='ready'||!client)return res.status(503).json({ok:false,error:'whatsapp_not_ready'});let n=phone(req.body.to);if(!n)return res.status(400).json({ok:false,error:'phone_missing'});let chat=n+'@c.us';let exists=await client.isRegisteredUser(chat);if(!exists)return res.status(400).json({ok:false,error:'number_not_registered',phone:n});let msg=String(req.body.message||'').trim();if(!msg)return res.status(400).json({ok:false,error:'message_missing'});let sent=await client.sendMessage(chat,msg);res.json({ok:true,id:sent.id&&sent.id._serialized||'',phone:n});}catch(e){res.status(500).json({ok:false,error:e.message||String(e)});}});
-app.post('/logout',async(req,res)=>{try{if(client){await client.logout().catch(()=>{});await client.destroy().catch(()=>{});}client=null;qrText='';state='disconnected';setTimeout(boot,700);res.json({ok:true});}catch(e){res.status(500).json({ok:false,error:e.message});}});
-app.listen(PORT,'127.0.0.1',()=>{console.log(`[ASHISH WA] http://127.0.0.1:${PORT}`);boot();});
+
+function initClient() {
+    state = 'starting';
+    client = new Client({
+        authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
+        puppeteer: {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--no-first-run',
+                '--no-zygote',
+                '--single-process'
+            ]
+        }
+    });
+
+    client.on('qr', (qr) => {
+        qrText = qr;
+        state = 'qr';
+        console.log('[ASHISH QR] تم إنشاء رمز QR جديد');
+    });
+
+    client.on('authenticated', () => {
+        console.log('[ASHISH] تم التحقق بنجاح');
+    });
+
+    client.on('ready', () => {
+        state = 'ready';
+        qrText = '';
+        console.log('[ASHISH] جاهز للعمل - تم الربط!');
+    });
+
+    client.on('auth_failure', (msg) => {
+        state = 'error';
+        console.error('[ASHISH] فشل التحقق:', msg);
+    });
+
+    client.on('disconnected', () => {
+        state = 'disconnected';
+        qrText = '';
+        client = null;
+        setTimeout(initClient, 5000);
+    });
+
+    try {
+        client.initialize();
+    } catch (e) {
+        state = 'error';
+        console.error(e);
+    }
+}
+
+// صفحة الويب لعرض رمز QR بدقة عالية في المتصفح
+app.get('/', async (req, res) => {
+    if (state === 'ready') {
+        return res.send('<div style="text-align:center;margin-top:50px;font-family:sans-serif;direction:rtl;"><h2 style="color:green;">✅ متصل بالواتساب والخدمة جاهزة للعمل!</h2></div>');
+    }
+    if (!qrText) {
+        return res.send('<div style="text-align:center;margin-top:50px;font-family:sans-serif;direction:rtl;"><h2>⏳ جاري تجهيز رمز QR...</h2><p>حدّث الصفحة بعد ثوانٍ</p></div>');
+    }
+    const qrImage = await QRCode.toDataURL(qrText);
+    res.send(`
+        <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:90vh;font-family:sans-serif;direction:rtl;">
+            <h2>امسح رمز QR لربط الواتساب</h2>
+            <img src="${qrImage}" style="width:280px;height:280px;border:2px solid #333;border-radius:10px;padding:10px;" alt="QR Code" />
+            <p style="color:#666;margin-top:15px;">افتح تطبيق واتساب > الأجهزة المرتبطة > ربط جهاز</p>
+        </div>
+    `);
+});
+
+app.get('/status', (req, res) => {
+    res.json({
+        ok: true,
+        state,
+        ready: state === 'ready',
+        qr: !!qrText,
+        label: state === 'ready' ? 'جاهز' : (state === 'qr' ? 'بانتظار مسح الرمز' : state)
+    });
+});
+
+app.get('/qr', async (req, res) => {
+    if (!qrText) return res.json({ ok: false, available: false });
+    try {
+        const qrImage = await QRCode.toDataURL(qrText);
+        res.json({ ok: true, available: true, qr: qrImage });
+    } catch (e) {
+        res.json({ ok: false, error: e.message });
+    }
+});
+
+app.post('/restart', async (req, res) => {
+    if (client) {
+        try { await client.destroy(); } catch (e) {}
+    }
+    initClient();
+    res.json({ ok: true });
+});
+
+app.post('/send', async (req, res) => {
+    try {
+        const { phone, message } = req.body;
+        if (state !== 'ready' || !client) {
+            return res.status(400).json({ ok: false, error: 'واتساب غير متصل حالياً' });
+        }
+        if (!phone || !message) {
+            return res.status(400).json({ ok: false, error: 'رقم الهاتف والرسالة مطلوبان' });
+        }
+        const chatId = formatNumber(phone);
+        const result = await client.sendMessage(chatId, message);
+        res.json({ ok: true, id: result.id._serialized });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
+app.post('/logout', async (req, res) => {
+    try {
+        if (client) {
+            await client.logout();
+            await client.destroy();
+        }
+        state = 'disconnected';
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
+// الربط على 0.0.0.0 ليتعرف Render على المنفذ
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[ASHISH WA] http://0.0.0.0:${PORT}`);
+    initClient();
+});
